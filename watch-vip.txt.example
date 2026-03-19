@@ -1,0 +1,19 @@
+# Apple Mail Watch — VIP Senders
+# One name or email fragment per line. Case-insensitive partial match.
+# Lines starting with # are comments.
+# Copy this file to watch-vip.txt and edit with your contacts.
+
+# Family
+# family.member@email.com
+# spouse
+
+# Financial / Insurance
+# accountant@firm.com
+# insurance.agent
+
+# Legal
+# attorney@lawfirm.com
+
+# Work
+# boss@company.com
+# hr@company.com

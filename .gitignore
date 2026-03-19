@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# VIP list (user-specific — use watch-vip.txt.example as template)
+watch-vip.txt
+
+# Watch state and logs
+.cache/
+logs/
+
+# Environment files
+.env
+.env.local
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
