@@ -1094,12 +1094,25 @@ save_attachment() {
 
     if [[ -z "$email_id" ]]; then echo "Error: Email ID required" >&2; return 1; fi
 
-    mkdir -p "$out_dir" 2>/dev/null
+    # --out 可能是相对路径或带 ~ 的原始字符串：统一成绝对路径，否则 bash 建在
+    # $PWD 而 AppleScript 的 POSIX file 按 / 解析，两边基准不一致导致全部失败。
+    case "$out_dir" in
+        "~/"*) out_dir="$HOME/${out_dir#\~/}" ;;
+        /*) ;;
+        *) out_dir="$PWD/$out_dir" ;;
+    esac
+    mkdir -p "$out_dir" 2>/dev/null || { echo "Error: cannot create $out_dir" >&2; return 1; }
 
-    local esc_out
-    esc_out=$(osa_str "$out_dir")
+    # 先落到临时目录再搬到目标：这样文件名清洗与「不覆盖同名文件」可以放在
+    # bash 里做，不必在 AppleScript 里逐次探测文件是否存在。
+    local tmpd
+    tmpd=$(mktemp -d) || { echo "Error: cannot create temp dir" >&2; return 1; }
 
-    osascript << OSAEOF
+    local esc_tmp
+    esc_tmp=$(osa_str "$tmpd")
+
+    local result rc
+    result=$(osascript << OSAEOF
 tell application "Mail"
     if not running then launch
 $(mb_resolve "$mailbox_name")
@@ -1107,25 +1120,52 @@ $(find_msg "$email_id" "$mailbox_name")
 
     set attList to mail attachments of targetMessage
     set attCount to count of attList
-    if attCount = 0 then
-        return "No attachments found on email ID $email_id"
-    end if
+    if attCount = 0 then return "HAS_NONE"
 
-    set savedFiles to ""
+    set savedCount to 0
     repeat with att in attList
-        set attName to name of att
-        set outPath to "$esc_out/" & attName
         try
-            save att in POSIX file outPath
-            set savedFiles to savedFiles & "Saved: " & attName & " → " & outPath & linefeed
-        on error errMsg
-            set savedFiles to savedFiles & "Error saving " & attName & ": " & errMsg & linefeed
+            save att in POSIX file ("$esc_tmp/" & (name of att))
+            set savedCount to savedCount + 1
         end try
     end repeat
-
-    return "Saved " & attCount & " attachment(s):" & linefeed & savedFiles
+    return "SAVED " & savedCount & " " & attCount
 end tell
 OSAEOF
+)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then rm -rf "$tmpd"; return $rc; fi
+    if [[ "$result" == "HAS_NONE" ]]; then
+        rm -rf "$tmpd"
+        echo "No attachments found on email ID $email_id"
+        return 0
+    fi
+
+    local _saved_n att_n
+    read -r _ _saved_n att_n <<< "$result"
+
+    local moved=0 f base dest n
+    shopt -s nullglob
+    for f in "$tmpd"/*; do
+        base=$(basename "$f")
+        base=${base//\//_}                 # 附件名里的路径分隔符
+        [[ "$base" == .* ]] && base="_$base"   # 隐藏文件 / 上跳
+        dest="$out_dir/$base"
+        n=2
+        while [[ -e "$dest" ]]; do          # 不覆盖已有文件
+            dest="$out_dir/${base} ($n)"
+            n=$((n + 1))
+        done
+        if mv "$f" "$dest"; then moved=$((moved + 1)); fi
+    done
+    shopt -u nullglob
+    rm -rf "$tmpd"
+
+    echo "Saved $moved of $att_n attachment(s) to: $out_dir"
+    if [[ "$moved" != "$att_n" ]]; then
+        echo "Error: $((att_n - moved)) attachment(s) could not be saved" >&2
+        return 1
+    fi
 }
 
 # ─────────────────────────────────────────────
