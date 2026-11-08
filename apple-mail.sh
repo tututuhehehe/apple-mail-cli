@@ -403,14 +403,17 @@ search_emails() {
     local mb_list_osa
     if [[ "$search_all" == "true" ]]; then
         mb_list_osa=$(cat << 'MBLIST'
-    set mailboxesToSearch to {inbox}
-    try
-        set end of mailboxesToSearch to sent mailbox
-    end try
+    -- 只搜「活着的邮件」。不再把合并 inbox 与 sent 单独加入（它们与各账户的
+    -- INBOX / Sent Messages 是同一批邮件，此前 --mailbox all 把每封列两遍），
+    -- 也排除 Junk / Deleted Messages / Drafts。
+    set mailboxesToSearch to {}
     repeat with acct_ in accounts
         try
             repeat with mb_ in mailboxes of acct_
-                set end of mailboxesToSearch to mb_
+                set mbName_ to name of mb_
+                if mbName_ is not "Junk" and mbName_ is not "Deleted Messages" and mbName_ is not "Drafts" then
+                    set end of mailboxesToSearch to mb_
+                end if
             end repeat
         end try
     end repeat
@@ -422,16 +425,23 @@ MBLIST
     fi
 
     local date_filter_osa=""
+    local ymd
     if [[ -n "$after_date" ]]; then
-        local after_year="${after_date:0:4}" after_month="${after_date:5:2}" after_day="${after_date:8:2}"
-        date_filter_osa+="    set afterDate_ to date \"${after_month}/${after_day}/${after_year} 00:00:00\""$'\n'
+        ymd="${after_date//-/}"; ymd="${ymd//\//}"
+        if [[ ! "$ymd" =~ ^[0-9]{8}$ ]]; then
+            echo "Error: --after expects YYYY-MM-DD (got: $after_date)" >&2; return 1
+        fi
+        date_filter_osa+="    set afterYMD_ to $ymd"$'\n'
         date_filter_osa+="    set filterAfter_ to true"$'\n'
     else
         date_filter_osa+="    set filterAfter_ to false"$'\n'
     fi
     if [[ -n "$before_date" ]]; then
-        local before_year="${before_date:0:4}" before_month="${before_date:5:2}" before_day="${before_date:8:2}"
-        date_filter_osa+="    set beforeDate_ to date \"${before_month}/${before_day}/${before_year} 23:59:59\""$'\n'
+        ymd="${before_date//-/}"; ymd="${ymd//\//}"
+        if [[ ! "$ymd" =~ ^[0-9]{8}$ ]]; then
+            echo "Error: --before expects YYYY-MM-DD (got: $before_date)" >&2; return 1
+        fi
+        date_filter_osa+="    set beforeYMD_ to $ymd"$'\n'
         date_filter_osa+="    set filterBefore_ to true"$'\n'
     else
         date_filter_osa+="    set filterBefore_ to false"$'\n'
@@ -445,6 +455,7 @@ $mb_list_osa
 
 $date_filter_osa
     set searchResults to {}
+    set seenIds to {}
     set maxResults to $count
 
     repeat with searchMailbox in mailboxesToSearch
@@ -485,10 +496,20 @@ $date_filter_osa
                 end if
 
                 set includeMsg_ to true
-                if filterAfter_ and (date received of msg) < afterDate_ then set includeMsg_ to false
-                if filterBefore_ and (date received of msg) > beforeDate_ then set includeMsg_ to false
+                -- 用 YYYYMMDD 整数比较，绕开 AppleScript 的 date "MM/DD/YYYY" 对
+                -- 系统短日期顺序的依赖：在 zh_CN 下 02/01/2026 会被解析成
+                -- 2007-07-19，导致 --after 恒不生效、--before 恒为空。
+                set d_ to date received of msg
+                set msgYMD_ to (year of d_ as integer) * 10000 + (((month of d_) as integer) * 100) + (day of d_ as integer)
+                if filterAfter_ and msgYMD_ < afterYMD_ then set includeMsg_ to false
+                if filterBefore_ and msgYMD_ > beforeYMD_ then set includeMsg_ to false
                 if matchesQuery and matchesFrom and includeMsg_ then
-                    set end of searchResults to msg
+                    -- 同一条邮件可能出现在多个邮箱对象里，按 id 去重
+                    set msgId_ to id of msg
+                    if seenIds does not contain msgId_ then
+                        set end of seenIds to msgId_
+                        set end of searchResults to msg
+                    end if
                 end if
             end repeat
         end try
@@ -1136,8 +1157,18 @@ $(find_msg "$email_id" "$mailbox_name")
     set n to 1
 
     repeat with att in attList
-        set attName to name of att
-        set attMime to mime type of att
+        -- name / mime type 都可能抛 -10000（Mail 对某些真附件不返回 MIME，
+        -- 已实测 .pkpass 会让整个命令失败），逐属性容错而不是整体崩掉
+        set attName to missing value
+        try
+            set attName to name of att
+        end try
+        if attName is missing value then set attName to "(unnamed)"
+        set attMime to ""
+        try
+            set attMime to mime type of att
+        end try
+        if attMime is missing value then set attMime to ""
         try
             set output to output & n & ". " & attName & " | " & attMime & " | " & (file size of att) & " bytes" & linefeed
         on error
