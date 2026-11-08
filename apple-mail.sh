@@ -37,6 +37,17 @@ osa_str() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# 把字符串包成 YAML 双引号标量。裸值会让 frontmatter 在主题含 "Re: "、
+# "{a: b}"、"&anchor" 之类字符时被 YAML 解析器判为非法或改写值。
+yaml_quote() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\t'/\\t}
+    s=${s//$'\r'/}
+    printf '"%s"' "$s"
+}
+
 # Generate AppleScript that sets 'targetMailbox' from a mailbox name string.
 # For system mailboxes: direct reference. For custom: searches accounts at runtime.
 mb_resolve() {
@@ -1275,7 +1286,10 @@ $(find_msg "$email_id" "$mailbox_name")
         end repeat
     end try
 
-    return msgSubject & "|||" & msgSender & "|||" & (msgDate as string) & "|||" & toAddrs & "|||" & ccAddrs & "|||" & attNames & "|||" & msgBody
+    set sep_ to (character id 31)
+    set d_ to date received of targetMessage
+    set isoDate to (year of d_ as integer as string) & "-" & text -2 thru -1 of ("0" & ((month of d_) as integer as string)) & "-" & text -2 thru -1 of ("0" & (day of d_ as integer as string))
+    return msgSubject & sep_ & msgSender & sep_ & (msgDate as string) & sep_ & toAddrs & sep_ & ccAddrs & sep_ & attNames & sep_ & isoDate & sep_ & msgBody
 end tell
 OSAEOF
 )
@@ -1284,14 +1298,19 @@ OSAEOF
         return 1
     fi
 
-    local subj sender date_str to_str cc_str att_str body_str
-    subj=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $1}')
-    sender=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $2}')
-    date_str=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $3}')
-    to_str=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $4}')
-    cc_str=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $5}')
-    att_str=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $6}')
-    body_str=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $7}')
+    local US=$'\037'
+    local subj="" sender="" date_str="" to_str="" cc_str="" att_str="" date_iso="" body_str=""
+    local rest="$raw"
+    # 用 0x1f 分隔而不是 "|||"：主题或正文里出现 ||| 时会错位或截断正文。
+    # 用逐段剥离而不是 read，因为 read 到第一个换行就停（正文是多行的）。
+    subj=${rest%%"$US"*};     rest=${rest#*"$US"}
+    sender=${rest%%"$US"*};   rest=${rest#*"$US"}
+    date_str=${rest%%"$US"*}; rest=${rest#*"$US"}
+    to_str=${rest%%"$US"*};   rest=${rest#*"$US"}
+    cc_str=${rest%%"$US"*};   rest=${rest#*"$US"}
+    att_str=${rest%%"$US"*};  rest=${rest#*"$US"}
+    date_iso=${rest%%"$US"*}; rest=${rest#*"$US"}
+    body_str=$rest
     local nl
     nl=$(printf '\n')
     subj="${subj//$nl/ }"
@@ -1304,27 +1323,51 @@ OSAEOF
     local today
     today=$(date '+%Y-%m-%d')
     if [[ -z "$out_path" ]]; then
-        local safe_subj
-        safe_subj=$(echo "$subj" | tr '/:*?"<>|\\' '-' | cut -c1-60)
-        out_path="$HOME/Downloads/${today} ${safe_subj}.email.md"
+        local safe_subj base n
+        safe_subj=$(printf '%s' "$subj" | tr '/:*?"<>|\\' '-')
+        safe_subj="${safe_subj:0:60}"
+        mkdir -p "$HOME/Downloads" 2>/dev/null || true
+        # 同主题同一天导出两次会互相覆盖；短主题截断到 60 字符后也会撞名
+        base="$HOME/Downloads/${today} ${safe_subj}"
+        out_path="${base}.email.md"
+        n=2
+        while [[ -e "$out_path" ]]; do
+            out_path="${base} (${n}).email.md"
+            n=$((n + 1))
+        done
+    else
+        mkdir -p "$(dirname "$out_path")" 2>/dev/null || true
     fi
 
     local sender_email
     sender_email=$(echo "$sender" | grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' | head -1)
 
+    # 不能靠 `if ! { ... } > "$out"` 判断写失败：bash 在重定向出错时会直接
+    # 跳过整个 if 语句（实测既不进 then 也不进 else）。改成事前查目录、事后查文件。
+    local out_dir_n
+    out_dir_n=$(dirname "$out_path")
+    if [[ ! -d "$out_dir_n" ]]; then
+        echo "Error: target directory does not exist: $out_dir_n" >&2
+        return 1
+    fi
+    if [[ ! -w "$out_dir_n" ]]; then
+        echo "Error: target directory is not writable: $out_dir_n" >&2
+        return 1
+    fi
+
     {
         echo "---"
-        echo "created: $today"
-        echo "modified: $today"
+        echo "created: $(yaml_quote "$today")"
+        echo "modified: $(yaml_quote "$today")"
         echo "document-type: email"
         echo "status: archive"
         echo "tags:"
         echo "  - email-archive"
-        echo "from: ${sender_email:-$sender}"
-        echo "to: $to_str"
-        [[ -n "$cc_str" ]] && echo "cc: $cc_str"
-        echo "subject: $subj"
-        echo "date: $today"
+        echo "from: $(yaml_quote "${sender_email:-$sender}")"
+        echo "to: $(yaml_quote "$to_str")"
+        [[ -n "$cc_str" ]] && echo "cc: $(yaml_quote "$cc_str")"
+        echo "subject: $(yaml_quote "$subj")"
+        echo "date: $(yaml_quote "${date_iso:-$today}")"
         echo "email-id: $email_id"
         echo "---"
         echo "# $subj"
@@ -1337,8 +1380,16 @@ OSAEOF
         echo "---"
         echo ""
         echo "$body_str"
-        [[ -n "$att_str" ]] && echo "" && echo "**Attachments:** $att_str"
+        if [[ -n "$att_str" ]]; then
+            echo ""
+            echo "**Attachments:** $att_str"
+        fi
     } > "$out_path"
+
+    if [[ ! -s "$out_path" ]]; then
+        echo "Error: cannot write $out_path" >&2
+        return 1
+    fi
 
     echo "Exported: $out_path"
 }
