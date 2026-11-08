@@ -590,8 +590,7 @@ send_email() {
 tell application "Mail"
     if not running then launch
 
-    set msgProps to {subject:"$esc_subj", content:"$esc_body
-"}
+    set msgProps to {subject:"$esc_subj", content:"$esc_body"}
     if "$esc_from" is not "" then
         set msgProps to msgProps & {sender:"$esc_from"}
     end if
@@ -607,7 +606,13 @@ $to_osa
         end if
     end tell
 $att_osa
-    tell newMessage to send
+    -- send 返回 "true if sending was successful, false if not"（Mail.sdef）。
+    -- 以前丢弃返回值，发送被拒也报 "Sent"。
+    set sendOK to false
+    tell newMessage
+        set sendOK to send
+    end tell
+    if sendOK is false then error "Mail did not accept the message for sending — check the account's outgoing server"
 
     set resultStr to "Sent ($att_count attachment(s)) → $esc_to_summary"
     if $att_count = 0 then set resultStr to "Sent → $esc_to_summary"
@@ -624,15 +629,23 @@ OSAEOF
 reply_email() {
     local email_id="$1"; shift
     local reply_body="" mailbox_name="inbox" reply_all="false" cc_addr="" bcc_addr=""
+    local body_seen="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --all|-a)     reply_all="true"; shift ;;
             --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             --cc|-c)      need_val "$1" "$#"; cc_addr="$2"; shift 2 ;;
             --bcc|-b)     need_val "$1" "$#"; bcc_addr="$2"; shift 2 ;;
-            *)            reply_body="$1"; shift ;;
+            # 正文允许不带引号分成多个词，全部拼回去；flag 与正文的先后顺序因此不再影响结果
+            *)            body_seen="true"; reply_body="${reply_body:+$reply_body }$1"; shift ;;
         esac
     done
+
+    # 没有正文就不发信：此前 `reply <id> --all` 会给所有原收件人发一封空回复
+    if [[ "$body_seen" != "true" ]]; then
+        echo "Error: reply body required — usage: reply <id> \"your text\" [--all] [--cc <addr>]" >&2
+        return 1
+    fi
 
     local esc_body esc_mb esc_cc esc_bcc
     esc_body=$(osa_str "$reply_body")
@@ -647,42 +660,47 @@ $(mb_resolve "$mailbox_name")
 $(find_msg "$email_id" "$mailbox_name")
 
     set originalSender to sender of targetMessage
+    set replySubject to subject of targetMessage
+    if replySubject does not start with "Re: " then set replySubject to "Re: " & replySubject
 
+    -- 构造回复对象与发送分成两步：只有「构造」失败才降级为新建消息；
+    -- 发送放在 try 之外，避免 send 抛错后被降级分支再发一封（重复投递）。
+    set replyMessage to missing value
     try
-        set replyMessage to missing value
         if $reply_all then
             set replyMessage to reply targetMessage with reply to all
         else
             set replyMessage to reply targetMessage
         end if
-        tell replyMessage
-            set content to "$esc_body" & return & return & content
-            if "$esc_cc" is not "" then
-                make new cc recipient at end of cc recipients with properties {address:"$esc_cc"}
-            end if
-            if "$esc_bcc" is not "" then
-                make new bcc recipient at end of bcc recipients with properties {address:"$esc_bcc"}
-            end if
-            send
-        end tell
     on error
-        set replySubject to subject of targetMessage
-        if replySubject does not start with "Re: " then set replySubject to "Re: " & replySubject
-        set newReply to make new outgoing message with properties {subject:replySubject, content:"$esc_body"}
-        tell newReply
-            make new to recipient at end of to recipients with properties {address:originalSender}
-            if "$esc_cc" is not "" then
-                make new cc recipient at end of cc recipients with properties {address:"$esc_cc"}
-            end if
-            if "$esc_bcc" is not "" then
-                make new bcc recipient at end of bcc recipients with properties {address:"$esc_bcc"}
-            end if
-            send
-        end tell
+        set replyMessage to missing value
     end try
+
+    set isReplyObject to (replyMessage is not missing value)
+    if isReplyObject then
+        tell replyMessage to set content to "$esc_body" & return & return & content
+    else
+        set replyMessage to make new outgoing message with properties {subject:replySubject, content:"$esc_body"}
+        tell replyMessage
+            make new to recipient at end of to recipients with properties {address:originalSender}
+        end tell
+    end if
+
+    tell replyMessage
+        if "$esc_cc" is not "" then
+            make new cc recipient at end of cc recipients with properties {address:"$esc_cc"}
+        end if
+        if "$esc_bcc" is not "" then
+            make new bcc recipient at end of bcc recipients with properties {address:"$esc_bcc"}
+        end if
+        set sendOK to send
+    end tell
+
+    if sendOK is false then error "Mail refused to send the reply — check the account's outgoing server"
 
     set resultStr to "Reply sent → " & originalSender
     if $reply_all then set resultStr to resultStr & " (reply-all)"
+    if not isReplyObject then set resultStr to resultStr & " [fallback: original thread not quoted]"
     if "$esc_cc" is not "" then set resultStr to resultStr & " | CC: $esc_cc"
     if "$esc_bcc" is not "" then set resultStr to resultStr & " | BCC: $esc_bcc"
     return resultStr
@@ -1643,8 +1661,9 @@ main() {
             [[ $# -lt 2 ]] && { echo "Usage: reply <id> <body> [--all]"; exit 1; }
             reply_email "$@" ;;
         reply-all|replyall)
-            [[ $# -lt 2 ]] && { echo "Usage: reply-all <id> <body>"; exit 1; }
-            reply_email "$1" "$2" --all "${@:3}" ;;
+            [[ $# -lt 1 ]] && { echo "Usage: reply-all <id> <body> [--cc <addr>] [--mailbox <name>]" >&2; exit 1; }
+            # 不再用 "$1" "$2" --all "${@:3}" 重拼参数：那会让 `--cc a@b` 变成正文、`--all` 变成 CC
+            reply_email "$1" --all "${@:2}" ;;
         forward|fwd)
             forward_email "$@" ;;
         draft|save-draft)
