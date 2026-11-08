@@ -140,7 +140,7 @@ show_usage() {
     cat << 'USAGEEOF'
 READING:
     list    [--mailbox <name>] [--unread] [count]
-    read    <id> [--mailbox <name>]
+    read    <id> [--mailbox <name>] [--keep-unread]
     unread  [--mailbox <name>]
     thread  <id> [--mailbox <name>]
     thread-read <id> [--mailbox <name>]   (full thread with bodies)
@@ -231,7 +231,11 @@ list_emails() {
         case "$1" in
             --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             --unread|-u)  unread_only="true"; shift ;;
-            *)            count="$1"; shift ;;
+            *)            if [[ ! "$1" =~ ^[0-9]+$ ]]; then
+                              echo "Error: unexpected argument: $1 (usage: list [count] [--mailbox <name>] [--unread])" >&2
+                              exit 1
+                          fi
+                          count="$1"; shift ;;
         esac
     done
 
@@ -294,13 +298,17 @@ OSAEOF
 # ─────────────────────────────────────────────
 read_email() {
     local email_id="$1"; shift
-    local mailbox_name="inbox"
+    local mailbox_name="inbox" keep_unread="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m)     need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
+            --keep-unread|-k) keep_unread="true"; shift ;;
             *) shift ;;
         esac
     done
+
+    local keep_unread_osa="false"
+    [[ "$keep_unread" == "true" ]] && keep_unread_osa="true"
 
     local esc_mb
     esc_mb=$(osa_str "$mailbox_name")
@@ -358,7 +366,13 @@ $(find_msg "$email_id" "$mailbox_name")
         set isHtml to true
     end if
 
-    set read status of targetMessage to true
+    -- 默认把邮件标为已读（与旧行为一致），但 --keep-unread 可以关掉：
+    -- 以前「看一眼」就会改服务器上的已读状态，且没有任何 opt-out。
+    if $keep_unread_osa then
+        -- 保持原状态
+    else
+        set read status of targetMessage to true
+    end if
 
     set output to "======================================" & linefeed
     set output to output & "Subject: " & msgSubject & linefeed
@@ -397,9 +411,17 @@ search_emails() {
             --body|-b)   search_body="true"; shift ;;
             --after)     need_val "$1" "$#"; after_date="$2"; shift 2 ;;
             --before)    need_val "$1" "$#"; before_date="$2"; shift 2 ;;
+            -*)
+                # 以前未知选项会被静默当成查询词或丢弃：`--aftr 2026-01-01` 会让日期
+                # 过滤根本没生效却返回正常结果
+                echo "Error: unknown option: $1 (see: apple-mail.sh help)" >&2
+                exit 1 ;;
             *)
                 if [[ -z "$query" ]]; then query="$1"
                 elif [[ "$1" =~ ^[0-9]+$ ]]; then count="$1"
+                else
+                    echo "Error: unexpected argument: $1" >&2
+                    exit 1
                 fi
                 shift ;;
         esac
