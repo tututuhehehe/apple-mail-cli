@@ -773,7 +773,10 @@ save_draft() {
     osascript << OSAEOF
 tell application "Mail"
     if not running then launch
-    set draftMsg to make new outgoing message with properties {subject:"$esc_subj", content:"$esc_body"}
+    -- visible 默认为 false；不设它、也不调用 save 的话，这个 outgoing message
+    -- 既不在 Drafts 也不在发件队列里，函数返回后对象就没了（用户看到
+    -- "Draft saved" 却找不到草稿）。
+    set draftMsg to make new outgoing message with properties {subject:"$esc_subj", content:"$esc_body", visible:true}
     tell draftMsg
         if "$esc_to" is not "" then
             make new to recipient at end of to recipients with properties {address:"$esc_to"}
@@ -781,8 +784,13 @@ tell application "Mail"
         if "$esc_cc" is not "" then
             make new cc recipient at end of cc recipients with properties {address:"$esc_cc"}
         end if
+        save
     end tell
-    return "Draft saved: \"$esc_subj\""
+    set draftSubject to subject of draftMsg
+    try
+        close draftMsg saving yes
+    end try
+    return "Draft saved: \"" & draftSubject & "\""
 end tell
 OSAEOF
 }
@@ -1281,18 +1289,25 @@ archive_email() {
 
     local esc_mb
     esc_mb=$(osa_str "$mailbox_name")
-    local dest_osa
-    dest_osa=$(mb_resolve "Archive" | sed 's/targetMailbox/destMailbox/g')
 
     osascript << OSAEOF
 tell application "Mail"
     if not running then launch
 $(mb_resolve "$mailbox_name")
 $(find_msg "$email_id" "$mailbox_name")
-$dest_osa
+
     set msgSubject to subject of targetMessage
+    -- Archive 必须落在源邮件所属账户。用 mb_resolve 全局找一个 "Archive" 会命中
+    -- 第一个同名邮箱（本机是 iCloud 的空 Archive），等于静默跨账户搬迁。
+    set srcAcct to account of mailbox of targetMessage
+    set destMailbox to missing value
+    try
+        set destMailbox to first mailbox of srcAcct whose name is "Archive"
+    end try
+    if destMailbox is missing value then error "Account " & (name of srcAcct) & " has no Archive mailbox — use move <id> <mailbox>"
+
     move targetMessage to destMailbox
-    return "Archived: " & msgSubject & " → Archive"
+    return "Archived: " & msgSubject & " → Archive (" & (name of srcAcct) & ")"
 end tell
 OSAEOF
 }
