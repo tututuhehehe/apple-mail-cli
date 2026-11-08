@@ -921,15 +921,46 @@ move_email() {
     local esc_dest
     esc_dest=$(osa_str "$dest_name")
 
+    # 系统邮箱名得先翻译成“该账户里实际的邮箱名”：`trash mailbox` 这类是
+    # class=container（含所有账户的同名邮箱），直接当 move 的目标落点不确定。
+    local dest_lower cands='{}'
+    dest_lower=$(printf '%s' "$dest_name" | tr '[:upper:]' '[:lower:]')
+    case "$dest_lower" in
+        inbox)                                  cands='{"INBOX", "Inbox", "收件箱"}' ;;
+        sent|"sent messages")                   cands='{"Sent Messages", "Sent", "已发送"}' ;;
+        drafts|draft)                           cands='{"Drafts", "Draft", "草稿箱", "草稿"}' ;;
+        trash|deleted|"deleted messages")       cands='{"Deleted Messages", "Trash", "已删除"}' ;;
+        junk|spam)                              cands='{"Junk", "Junk E-mail", "垃圾邮件"}' ;;
+    esac
+
     osascript << OSAEOF
 tell application "Mail"
     if not running then launch
 $(mb_resolve "$src_name")
 $(find_msg "$email_id" "$src_name")
     set msgSubject to subject of targetMessage
-$(mb_resolve "$dest_name" | sed 's/targetMailbox/destMailbox/g')
+    set srcAcct to account of mailbox of targetMessage
+    set srcMailbox to mailbox of targetMessage
+
+    set destMailbox to missing value
+    repeat with cand_ in $cands
+        try
+            set candName_ to contents of cand_
+            set destMailbox to first mailbox of srcAcct whose name is candName_
+            exit repeat
+        end try
+    end repeat
+    if destMailbox is missing value then
+        -- 自定义邮箱：先在源账户内找，避免落入另一个账户的同名邮箱
+        try
+            set destMailbox to first mailbox of srcAcct whose name is "$esc_dest"
+        end try
+    end if
+    if destMailbox is missing value then error "No mailbox named \"$esc_dest\" in account " & (name of srcAcct)
+    if destMailbox is srcMailbox then error "Message is already in \"$esc_dest\""
+
     move targetMessage to destMailbox
-    return "Moved \"" & msgSubject & "\" → $esc_dest"
+    return "Moved \"" & msgSubject & "\" → " & (name of destMailbox) & " (" & (name of srcAcct) & ")"
 end tell
 OSAEOF
 }
