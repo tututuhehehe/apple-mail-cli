@@ -1005,18 +1005,34 @@ $(mb_resolve "$mailbox_name")
 $(find_msg "$email_id" "$mailbox_name")
 
     set baseSubject to subject of targetMessage as string
-    if baseSubject starts with "Re: " then set baseSubject to text 5 thru -1 of baseSubject
-    if baseSubject starts with "Fwd: " then set baseSubject to text 6 thru -1 of baseSubject
-    if baseSubject starts with "FW: " then set baseSubject to text 5 thru -1 of baseSubject
-    if baseSubject starts with "RE: " then set baseSubject to text 5 thru -1 of baseSubject
+    -- 循环剥离，而不是只剥一层："Re: Re: X" 在旧实现里会留下 "Re: X"，
+    -- 与 "X" 不相等，于是整条会话被漏掉。
+    repeat
+        if (count of baseSubject) > 4 and baseSubject starts with "Re: " then
+            set baseSubject to text 5 thru end of baseSubject
+        else if (count of baseSubject) > 5 and baseSubject starts with "Fwd: " then
+            set baseSubject to text 6 thru end of baseSubject
+        else if (count of baseSubject) > 4 and baseSubject starts with "FW: " then
+            set baseSubject to text 5 thru end of baseSubject
+        else
+            exit repeat
+        end if
+    end repeat
 
     set threadMessages to {}
     repeat with msg in messages of targetMailbox
         set s to subject of msg as string
-        if s starts with "Re: " then set s to text 5 thru -1 of s
-        if s starts with "Fwd: " then set s to text 6 thru -1 of s
-        if s starts with "FW: " then set s to text 5 thru -1 of s
-        if s starts with "RE: " then set s to text 5 thru -1 of s
+        repeat
+            if (count of s) > 4 and s starts with "Re: " then
+                set s to text 5 thru end of s
+            else if (count of s) > 5 and s starts with "Fwd: " then
+                set s to text 6 thru end of s
+            else if (count of s) > 4 and s starts with "FW: " then
+                set s to text 5 thru end of s
+            else
+                exit repeat
+            end if
+        end repeat
         if s is baseSubject then set end of threadMessages to msg
     end repeat
 
