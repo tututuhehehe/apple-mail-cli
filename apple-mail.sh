@@ -6,6 +6,32 @@
 
 VERSION="2.3.0"
 
+# ── 统一失败语义 ────────────────────────────────────────────────
+# 需要取值的选项统一守卫：缺值时立刻失败，而不是让 "$2" 取空、
+# shift 越界后原地死循环（旧行为：静默挂死、无输出、无法诊断）。
+need_val() {
+    local flag="$1" remaining="$2"
+    if [[ "$remaining" -lt 2 ]]; then
+        printf 'Error: %s requires a value\n' "$flag" >&2
+        exit 1
+    fi
+}
+
+# 包一层 osascript：把 AppleScript 的 "行:列: execution error: 消息 (-NNN)"
+# 清洗成一行可读错误，并原样保留退出码。所有命令因此共用同一套失败语义：
+# 失败 → 非零退出 + 单行 stderr，而不是把错误当正常输出并以 0 退出。
+osascript() {
+    local tmp out rc
+    tmp=$(mktemp -t apple-mail-cli) || return 1
+    out=$(command osascript "$@" 2>"$tmp"); rc=$?
+    if [[ -s "$tmp" ]]; then
+        sed -E 's/^[0-9]+:[0-9]+: (execution|syntax) error: //; s/ \(-[0-9]+\)$//' "$tmp" >&2
+    fi
+    rm -f "$tmp"
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    return $rc
+}
+
 # Escape a string for safe embedding in AppleScript double-quoted string literals
 osa_str() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -74,7 +100,7 @@ mb_resolve() {
                 printf '    end repeat\n'
             fi
             printf '    if not mbFound_ then\n'
-            printf '        return "Error: Mailbox not found: %s. Run apple-mail.sh folders to see all mailboxes."\n' "$m_esc"
+            printf '        error "Mailbox not found: %s. Run apple-mail.sh folders to see all mailboxes."\n' "$m_esc"
             printf '    end if\n' ;;
     esac
 }
@@ -95,7 +121,7 @@ find_msg() {
     printf '            end if\n'
     printf '        end repeat\n'
     printf '    end try\n'
-    printf '    if targetMessage is null then return "Error: Email ID %s not found in %s"\n' "$esc_id" "$(osa_str "$mb_label")"
+    printf '    if targetMessage is null then error "Email ID %s not found in %s"\n' "$esc_id" "$(osa_str "$mb_label")"
 }
 
 show_usage() {
@@ -192,7 +218,7 @@ list_emails() {
     local mailbox_name="inbox" unread_only="false" count=10
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             --unread|-u)  unread_only="true"; shift ;;
             *)            count="$1"; shift ;;
         esac
@@ -260,7 +286,7 @@ read_email() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -355,11 +381,11 @@ search_emails() {
                 [[ "$2" == "all" ]] && search_all="true"
                 shift 2 ;;
             all)   mailbox_name="all"; search_all="true"; shift ;;
-            --from|-f)   from_filter="$2"; shift 2 ;;
+            --from|-f)   need_val "$1" "$#"; from_filter="$2"; shift 2 ;;
             --unread|-u) unread_only="true"; shift ;;
             --body|-b)   search_body="true"; shift ;;
-            --after)     after_date="$2"; shift 2 ;;
-            --before)    before_date="$2"; shift 2 ;;
+            --after)     need_val "$1" "$#"; after_date="$2"; shift 2 ;;
+            --before)    need_val "$1" "$#"; before_date="$2"; shift 2 ;;
             *)
                 if [[ -z "$query" ]]; then query="$1"
                 elif [[ "$1" =~ ^[0-9]+$ ]]; then count="$1"
@@ -509,13 +535,13 @@ send_email() {
     else
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --to|-t)      to_addrs+=("$2"); shift 2 ;;
-                --cc|-c)      cc_addr="$2"; shift 2 ;;
-                --bcc|-b)     bcc_addr="$2"; shift 2 ;;
-                --from|-f)    from_addr="$2"; shift 2 ;;
-                --subject|-s) subject="$2"; shift 2 ;;
-                --body|-B)    body="$2"; shift 2 ;;
-                --attach|--attachment|-A)  attachments+=("$2"); shift 2 ;;
+                --to|-t)      need_val "$1" "$#"; to_addrs+=("$2"); shift 2 ;;
+                --cc|-c)      need_val "$1" "$#"; cc_addr="$2"; shift 2 ;;
+                --bcc|-b)     need_val "$1" "$#"; bcc_addr="$2"; shift 2 ;;
+                --from|-f)    need_val "$1" "$#"; from_addr="$2"; shift 2 ;;
+                --subject|-s) need_val "$1" "$#"; subject="$2"; shift 2 ;;
+                --body|-B)    need_val "$1" "$#"; body="$2"; shift 2 ;;
+                --attach|--attachment|-A)  need_val "$1" "$#"; attachments+=("$2"); shift 2 ;;
                 *) shift ;;
             esac
         done
@@ -601,9 +627,9 @@ reply_email() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --all|-a)     reply_all="true"; shift ;;
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
-            --cc|-c)      cc_addr="$2"; shift 2 ;;
-            --bcc|-b)     bcc_addr="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
+            --cc|-c)      need_val "$1" "$#"; cc_addr="$2"; shift 2 ;;
+            --bcc|-b)     need_val "$1" "$#"; bcc_addr="$2"; shift 2 ;;
             *)            reply_body="$1"; shift ;;
         esac
     done
@@ -672,9 +698,9 @@ forward_email() {
     local to_addr="" extra_body="" mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --to|-t)      to_addr="$2"; shift 2 ;;
-            --body|-b)    extra_body="$2"; shift 2 ;;
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --to|-t)      need_val "$1" "$#"; to_addr="$2"; shift 2 ;;
+            --body|-b)    need_val "$1" "$#"; extra_body="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -712,10 +738,10 @@ save_draft() {
     local to_addr="" cc_addr="" subject="" body=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --to|-t)      to_addr="$2"; shift 2 ;;
-            --cc|-c)      cc_addr="$2"; shift 2 ;;
-            --subject|-s) subject="$2"; shift 2 ;;
-            --body|-B)    body="$2"; shift 2 ;;
+            --to|-t)      need_val "$1" "$#"; to_addr="$2"; shift 2 ;;
+            --cc|-c)      need_val "$1" "$#"; cc_addr="$2"; shift 2 ;;
+            --subject|-s) need_val "$1" "$#"; subject="$2"; shift 2 ;;
+            --body|-B)    need_val "$1" "$#"; body="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -751,7 +777,7 @@ flag_email() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -780,7 +806,7 @@ mark_email() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -807,7 +833,7 @@ move_email() {
     local src_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) src_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; src_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -836,7 +862,7 @@ trash_email() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -860,7 +886,7 @@ count_unread() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -887,7 +913,7 @@ get_thread() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -936,7 +962,7 @@ thread_read() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -1013,8 +1039,8 @@ save_attachment() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
-            --out|-o)     out_dir="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
+            --out|-o)     need_val "$1" "$#"; out_dir="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -1063,7 +1089,7 @@ list_attachments() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -1108,8 +1134,8 @@ export_email() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
-            --out|-o)     out_path="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
+            --out|-o)     need_val "$1" "$#"; out_path="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -1156,6 +1182,10 @@ $(find_msg "$email_id" "$mailbox_name")
 end tell
 OSAEOF
 )
+    if [[ $? -ne 0 || -z "$raw" ]]; then
+        echo "Error: failed to export email $email_id" >&2
+        return 1
+    fi
 
     local subj sender date_str to_str cc_str att_str body_str
     subj=$(printf '%s\a' "$raw" | awk 'BEGIN{RS="\a"; FS="\\|\\|\\|"} {print $1}')
@@ -1224,7 +1254,7 @@ archive_email() {
     local mailbox_name="inbox"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m) mailbox_name="$2"; shift 2 ;;
+            --mailbox|-m) need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -1258,8 +1288,8 @@ bulk_operation() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --mailbox|-m)  mailbox_name="$2"; shift 2 ;;
-            --dest|-d)     dest_name="$2"; shift 2 ;;
+            --mailbox|-m)  need_val "$1" "$#"; mailbox_name="$2"; shift 2 ;;
+            --dest|-d)     need_val "$1" "$#"; dest_name="$2"; shift 2 ;;
             --unread-only|-u) unread_only="true"; shift ;;
             --confirm|-c)  confirm="true"; shift ;;
             --force|-f)    force="true"; confirm="true"; shift ;;
@@ -1314,6 +1344,13 @@ $(mb_resolve "$mailbox_name")
 end tell
 OSAEOF
 )
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    if [[ -z "$count_result" ]]; then
+        echo "Error: could not count messages in: $mailbox_name" >&2
+        return 1
+    fi
 
     if [[ "$confirm" != "true" ]]; then
         echo "DRY-RUN: Would $op $count_result message(s) from: $mailbox_name"
