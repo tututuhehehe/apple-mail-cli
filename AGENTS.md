@@ -1,6 +1,6 @@
-# Apple Mail CLI — Claude Code Context
+# Apple Mail CLI — Agent Context
 
-This file helps Claude Code understand and use the Apple Mail CLI effectively.
+This file helps coding agents understand and use the Apple Mail CLI effectively.
 
 ## Overview
 
@@ -105,7 +105,7 @@ apple-mail-cli/
 ├── test-apple-mail.sh      # Smoke test suite
 ├── install.sh              # Installer with alias setup
 ├── skill/SKILL.md          # Claude Code / AI agent skill definition
-├── CLAUDE.md               # This file
+├── AGENTS.md               # This file
 ├── README.md               # User documentation
 ├── CHANGELOG.md            # Version history
 └── LICENSE                 # MIT
