@@ -125,9 +125,8 @@ find_msg() {
 }
 
 show_usage() {
+    printf 'Apple Mail CLI v%s — Comprehensive macOS Mail.app Interface\n\n' "$VERSION"
     cat << 'USAGEEOF'
-Apple Mail Skill v2.1.0 — Comprehensive macOS Mail.app Interface
-
 READING:
     list    [--mailbox <name>] [--unread] [count]
     read    <id> [--mailbox <name>]
@@ -172,8 +171,9 @@ WATCH (new mail monitoring):
     watch start     Start monitoring for new mail (every 2 min via launchd)
     watch stop      Stop monitoring
     watch status    Show if running, last check time, new messages since last session
-    watch log [N]   Show recent watch notifications (default: 20 lines)
-    watch vip       Edit VIP sender list
+    watch log [N]   Show recent watch notifications (default: 30 lines)
+    watch vip       Show the VIP sender list
+    watch vip-add <fragment>   Add a sender (or name fragment) to the VIP list
     watch check     Run a one-time check now (manual trigger)
 
 INFO:
@@ -1368,6 +1368,15 @@ bulk_operation() {
         echo "Error: --dest <folder> required for bulk-move" >&2; return 1
     fi
 
+    # delete 对已在垃圾桶的邮件是空操作（Mail 没有 AppleScript 的 erase/expunge），
+    # 但以前照样打印 "N message(s) processed" —— 用户会以为已经清掉。
+    local m_lower
+    m_lower=$(printf '%s' "$mailbox_name" | tr '[:upper:]' '[:lower:]')
+    if [[ "$op" == "trash" ]] && { [[ "$m_lower" == "trash" ]] || [[ "$m_lower" == "deleted" ]] || [[ "$m_lower" == "deleted messages" ]]; }; then
+        echo "Error: messages already in Deleted Messages cannot be removed by delete — Mail exposes no expunge in AppleScript. Use Mailbox > Erase Deleted Items in Mail.app." >&2
+        return 1
+    fi
+
     local esc_mb esc_dest
     esc_mb=$(osa_str "$mailbox_name")
     esc_dest=$(osa_str "$dest_name")
@@ -1433,20 +1442,41 @@ OSAEOF
         fi
     fi
 
-    osascript << OSAEOF
+    local result rc
+    result=$(osascript << OSAEOF
 tell application "Mail"
     if not running then launch
 $(mb_resolve "$mailbox_name")
 $dest_osa
     $filter_osa
     set msgCount to count of msgList
+    set okCount to 0
+    set failCount to 0
+    -- 逐条执行并分别容错：以前任何一条出错（IMAP 重排、目标不可达）都会中
+    -- 断整批，而且不报告已经处理了多少条
     repeat with i from msgCount to 1 by -1
-        set msg_ to item i of msgList
-        $action_osa
+        try
+            set msg_ to item i of msgList
+            $action_osa
+            set okCount to okCount + 1
+        on error
+            set failCount to failCount + 1
+        end try
     end repeat
-    return (msgCount as string) & " message(s) processed from: $esc_mb"
+    return (okCount as string) & " " & (failCount as string) & " " & (msgCount as string)
 end tell
 OSAEOF
+)
+    rc=$?
+    [[ $rc -ne 0 ]] && return $rc
+
+    local ok_n fail_n total_n
+    read -r ok_n fail_n total_n <<< "$result"
+    echo "$op: $ok_n of $total_n message(s) processed from: $mailbox_name"
+    if [[ "$fail_n" != "0" ]]; then
+        echo "Error: $fail_n message(s) could not be processed" >&2
+        return 1
+    fi
 }
 
 # ─────────────────────────────────────────────
@@ -1606,14 +1636,48 @@ watch_command() {
                 echo "Watch is already running."
                 return 0
             fi
-            mkdir -p "$WATCH_CACHE"
-            # Seed state so first run doesn't alert on all existing unread
-            if [[ ! -f "$WATCH_CACHE/last-check.json" ]]; then
-                echo "Seeding initial state (suppressing first-run alerts)..."
-                bash "$WATCH_SCRIPT" 2>/dev/null || true
+            mkdir -p "$WATCH_CACHE" "$(dirname "$WATCH_PLIST")"
+
+            # 以前这里直接 launchctl load 一个从未被创建过的 plist（仓库里没有任何
+            # 生成它的代码），失败也照常打印 "Watch started"。现在先生成 plist，
+            # 再用 launchctl 自己确认是否真的注册上了。
+            local esc_script esc_log
+            esc_script=$(printf '%s' "$WATCH_SCRIPT" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+            esc_log=$(printf '%s' "$WATCH_CACHE/watch.log" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+            cat > "$WATCH_PLIST" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.apple-mail-cli.watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${esc_script}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${esc_log}</string>
+    <key>StandardErrorPath</key>
+    <string>${esc_log}</string>
+</dict>
+</plist>
+PLISTEOF
+
+            # launchctl load 失败时退出码也可能是 0，所以不拿它当判据。
+            launchctl load "$WATCH_PLIST" 2>/dev/null \
+                || launchctl bootstrap "gui/$(id -u)" "$WATCH_PLIST" 2>/dev/null \
+                || true
+            if ! launchctl list 2>/dev/null | grep -q "com.apple-mail-cli.watch"; then
+                echo "Error: launchd did not register com.apple-mail-cli.watch — see $WATCH_PLIST" >&2
+                return 1
             fi
-            launchctl load "$WATCH_PLIST"
             echo "Watch started (checking every 2 minutes)."
+            echo "Job:      $WATCH_PLIST"
             echo "VIP list: $WATCH_VIP"
             ;;
         stop)
@@ -1621,7 +1685,9 @@ watch_command() {
                 echo "Watch is not running."
                 return 0
             fi
-            launchctl unload "$WATCH_PLIST"
+            launchctl unload "$WATCH_PLIST" 2>/dev/null \
+                || launchctl bootout "gui/$(id -u)/com.apple-mail-cli.watch" 2>/dev/null \
+                || true
             echo "Watch stopped."
             ;;
         status)
@@ -1634,14 +1700,14 @@ watch_command() {
                 local last_mod
                 last_mod=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$WATCH_CACHE/last-check.json" 2>/dev/null || echo "unknown")
                 local count
-                count=$(/usr/bin/python3 -c "import json; print(len(json.load(open('$WATCH_CACHE/last-check.json'))))" 2>/dev/null || echo "?")
+                count=$(STATE="$WATCH_CACHE/last-check.json" /usr/bin/python3 -c 'import json,os; print(len(json.load(open(os.environ["STATE"]))))' 2>/dev/null || echo "?")
                 echo "Last check: $last_mod ($count unread cached)"
             else
                 echo "No state file yet (watch hasn't run)."
             fi
             if [[ -f "$WATCH_VIP" ]]; then
                 local vip_count
-                vip_count=$(grep -cv '^\s*$\|^\s*#' "$WATCH_VIP" 2>/dev/null || echo 0)
+                vip_count=$(grep -vc -e '^[[:space:]]*$' -e '^[[:space:]]*#' "$WATCH_VIP" 2>/dev/null || echo 0)
                 echo "VIP senders: $vip_count configured"
             fi
             ;;
@@ -1662,8 +1728,16 @@ watch_command() {
             ;;
         vip-add)
             local entry="$1"
-            [[ -z "$entry" ]] && { echo "Usage: watch vip-add <email-or-name-fragment>"; return 1; }
-            echo "$entry" >> "$WATCH_VIP"
+            [[ -z "$entry" ]] && { echo "Usage: watch vip-add <email-or-name-fragment>" >&2; return 1; }
+            entry=$(printf '%s' "$entry" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+            [[ -z "$entry" ]] && { echo "Error: empty sender" >&2; return 1; }
+            # 去重：重复追加会让同一个 VIP 在列表里堆多行；以 # 开头的条目会被
+            # is_vip 当成注释跳过，所以也挡住。
+            if [[ -f "$WATCH_VIP" ]] && grep -qixF -- "$entry" "$WATCH_VIP"; then
+                echo "'$entry' is already in the VIP list."
+                return 0
+            fi
+            printf '%s\n' "$entry" >> "$WATCH_VIP"
             echo "Added '$entry' to VIP list."
             ;;
         check)
@@ -1680,6 +1754,7 @@ watch_command() {
             echo "  vip      — Show VIP sender list"
             echo "  vip-add  — Add a sender to the VIP list"
             echo "  check    — Run a manual check now"
+            return 1
             ;;
     esac
 }
