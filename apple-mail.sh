@@ -32,6 +32,21 @@ osascript() {
     return $rc
 }
 
+# 把系统邮箱别名映射成「该账户里可能的名字」（AppleScript 列表字面量）。
+# move / bulk-move 必须落在邮件所属账户，否则同名邮箱会命中别的账户。
+dest_candidates_osa() {
+    local l
+    l=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$l" in
+        inbox)                              printf '%s' '{"INBOX", "Inbox", "收件箱"}' ;;
+        sent|"sent messages")               printf '%s' '{"Sent Messages", "Sent", "已发送"}' ;;
+        drafts|draft)                       printf '%s' '{"Drafts", "Draft", "草稿箱", "草稿"}' ;;
+        trash|deleted|"deleted messages")   printf '%s' '{"Deleted Messages", "Trash", "已删除"}' ;;
+        junk|spam)                          printf '%s' '{"Junk", "Junk E-mail", "垃圾邮件"}' ;;
+        *)                                  printf '%s' '{}' ;;
+    esac
+}
+
 # Escape a string for safe embedding in AppleScript double-quoted string literals
 osa_str() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -923,15 +938,8 @@ move_email() {
 
     # 系统邮箱名得先翻译成“该账户里实际的邮箱名”：`trash mailbox` 这类是
     # class=container（含所有账户的同名邮箱），直接当 move 的目标落点不确定。
-    local dest_lower cands='{}'
-    dest_lower=$(printf '%s' "$dest_name" | tr '[:upper:]' '[:lower:]')
-    case "$dest_lower" in
-        inbox)                                  cands='{"INBOX", "Inbox", "收件箱"}' ;;
-        sent|"sent messages")                   cands='{"Sent Messages", "Sent", "已发送"}' ;;
-        drafts|draft)                           cands='{"Drafts", "Draft", "草稿箱", "草稿"}' ;;
-        trash|deleted|"deleted messages")       cands='{"Deleted Messages", "Trash", "已删除"}' ;;
-        junk|spam)                              cands='{"Junk", "Junk E-mail", "垃圾邮件"}' ;;
-    esac
+    local cands
+    cands=$(dest_candidates_osa "$dest_name")
 
     osascript << OSAEOF
 tell application "Mail"
@@ -1541,9 +1549,31 @@ bulk_operation() {
     esc_mb=$(osa_str "$mailbox_name")
     esc_dest=$(osa_str "$dest_name")
 
-    local dest_osa=""
+    local dest_cands
+    dest_cands=$(dest_candidates_osa "$dest_name")
+    local dest_lookup_osa=""
     if [[ "$op" == "move" ]]; then
-        dest_osa=$(mb_resolve "$dest_name" | sed 's/targetMailbox/destMailbox/g')
+        # 每条邮件分别在自己的账户里找目标邮箱：批量场景下源邮箱可能是合并收件箱，
+        # 邮件分属不同账户，统一用 mb_resolve 会把它们统统搬进第一个同名账户。
+        dest_lookup_osa=$(cat << DESTOSA
+    set srcAcct_ to account of mailbox of msg_
+    set destMailbox to missing value
+    repeat with cand_ in $dest_cands
+        try
+            set candName_ to contents of cand_
+            set destMailbox to first mailbox of srcAcct_ whose name is candName_
+            exit repeat
+        end try
+    end repeat
+    if destMailbox is missing value then
+        try
+            set destMailbox to first mailbox of srcAcct_ whose name is "$esc_dest"
+        end try
+    end if
+    if destMailbox is missing value then error "No mailbox named \"$esc_dest\" in account " & (name of srcAcct_)
+    move msg_ to destMailbox
+DESTOSA
+)
     fi
 
     local action_osa=""
@@ -1552,7 +1582,7 @@ bulk_operation() {
             action_osa='delete msg_'
             ;;
         move)
-            action_osa='move msg_ to destMailbox'
+            action_osa=$dest_lookup_osa
             ;;
         mark-read)
             action_osa='set read status of msg_ to true'
@@ -1607,7 +1637,6 @@ OSAEOF
 tell application "Mail"
     if not running then launch
 $(mb_resolve "$mailbox_name")
-$dest_osa
     $filter_osa
     set msgCount to count of msgList
     set okCount to 0
